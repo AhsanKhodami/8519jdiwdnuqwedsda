@@ -107,6 +107,7 @@
 			let isDragging = false;
 			let lastDragEndTime = 0;
 			let initialCameraAngles = { azimuthal: 0, polar: 0 }; // track starting orientation per trial
+			const orientationData = []; // per-rotation orientation log
 			let practiceMode = false; // true during practice phase (no data logging)
 			let practiceControlPanel = null; // floating panel with Begin Main during practice
 			let suppressOverlayRecovery = false; // disables watchdog while practice/main active
@@ -204,6 +205,17 @@
 						const now = performance.now();
 						if(now - lastDragEndTime > 80){ // 80ms gap to separate gestures
 							markRotationGesture();
+							// Log orientation snapshot
+							const az = controls.getAzimuthalAngle();
+							const pol = controls.getPolarAngle();
+							const trialTime = Math.round(now - currentTrialStart);
+							orientationData.push({
+								trial: travelCount,
+								rotationIndex: rotationCount,
+								trialTimeMs: trialTime,
+								azimuthalDeg: Math.round(az * 180 / Math.PI * 100)/100,
+								polarDeg: Math.round(pol * 180 / Math.PI * 100)/100
+							});
 						}
 						lastDragEndTime = now;
 					}
@@ -618,6 +630,7 @@
 				firstRotationTime = null;
 				isDragging = false;
 				lastDragEndTime = 0;
+				orientationData.length = 0; // clear orientation log for new trial
 				// Reset camera to standard view for each new patch
 				camera.position.set( amount, amount, amount );
 				camera.lookAt( 0, 0, 0 );
@@ -1003,6 +1016,7 @@
 				firstRotationTime = null;
 				isDragging = false;
 				lastDragEndTime = 0;
+				orientationData.length = 0;
 				// Record initial camera angles for first trial
 				recordInitialCameraAngles();
 				experimentStartTime = performance.now();
