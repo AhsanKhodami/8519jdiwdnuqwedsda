@@ -830,6 +830,12 @@
 				trialData.forEach(t=>{
 					lines.push([t.trial,t.targetsPicked,t.targetsRejected,t.distractorsPicked,t.distractorsRejected,t.totalClicks,t.rotationCount ?? '',t.firstRotationTime ?? '',`[${t.rotationIntervals??''}]`,t.initialAzimuthal ?? '',t.initialPolar ?? ''].join(','));
 				});
+				lines.push('');
+				lines.push('ROTATION_ORIENTATION_LOG');
+				lines.push('trial,rotationIndex,trialTimeMs,azimuthalDeg,polarDeg');
+				orientationData.forEach(o=>{
+					lines.push([o.trial,o.rotationIndex,o.trialTimeMs,o.azimuthalDeg,o.polarDeg].join(','));
+				});
 				const csv = lines.join('\n');
 				const blob = new Blob([csv], { type: 'text/csv' });
 				const stamp = new Date().toISOString().replace(/[:T]/g,'-').split('.')[0];
