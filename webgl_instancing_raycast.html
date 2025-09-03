@@ -9,6 +9,37 @@
 			body { margin: 0; overflow: hidden; }
 			/* Disable context menu everywhere */
 			* { -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none; }
+			/* Enhanced loading visuals */
+			.loading-gradient {
+				background: radial-gradient(circle at 30% 30%, #2a002a, #050505 70%) !important;
+				animation: pulseBg 6s linear infinite;
+			}
+			@keyframes pulseBg { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
+			.loader-spinner {
+				width: 96px; height: 96px; position: relative; margin-bottom: 28px;
+			}
+			.loader-spinner:before, .loader-spinner:after {
+				content: ""; position: absolute; inset:0; border-radius:50%;
+				background: conic-gradient(from 0deg, #ff0040, #ff9a3c, #ffd23f, #ff0040);
+				animation: spin 1.8s linear infinite;
+				filter: blur(2px);
+			}
+			.loader-spinner:after { inset:10px; background:#111; filter:none; animation:none; box-shadow:0 0 4px #ff0040 inset, 0 0 12px #ff0040; }
+			@keyframes spin { to { transform: rotate(360deg); } }
+			.progress-wrapper { width: 340px; max-width:70vw; }
+			.progress-bar {
+				height: 10px; width:100%; background:rgba(255,255,255,0.12); border-radius:6px; overflow:hidden; box-shadow:0 0 0 1px rgba(255,255,255,0.08) inset;
+				margin-top:18px; position:relative;
+			}
+			.progress-fill {
+				--p:0%;
+				width:var(--p); height:100%;
+				background:linear-gradient(90deg,#ff0040,#ff5e29,#ffb30f);
+				box-shadow:0 0 6px #ff0040;
+				transition: width .6s cubic-bezier(.4,.17,.3,1);
+			}
+			.status-line { font-size:15px; letter-spacing:.5px; margin-top:14px; font-weight:500; opacity:.85; }
+			.travel-badge { font-size:12px; background:#ff0040; padding:3px 8px; border-radius:12px; margin-bottom:14px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 0 6px #ff0040; }
 		</style>
 	</head>
 	<body oncontextmenu="return false;">
@@ -30,8 +61,12 @@
 
 			let camera, scene, renderer, controls, stats;
 			let lastPickTime = 0; // debounce duplicate pointer events
+			let travelCount = 0; // number of "travels"
+			let visibleBerries; // will be (re)allocated per generation
+			let instancePositions; // stores Vector3 positions per instance
+			let mesh; // current instanced mesh
+			let loadingOverlay, loadingText, doneButton; // UI elements
 
-			let mesh;
 			const amount = parseInt( window.location.search.slice( 1 ) ) || 10;
 			const count = Math.pow( amount, 3 );
 
@@ -47,10 +82,9 @@
 			const greenBerry = new THREE.Color().setHex( 0x228b22 );   // Green berry (DISTRACTOR)
 			const darkGreen = new THREE.Color().setHex( 0x006400 );    // Dark green berry (DISTRACTOR)
 			
-			// Track which berries are still visible
-			const visibleBerries = new Array(count).fill(true);
-			// Store original positions for fallback picking (Vector3 per instance)
-			const instancePositions = new Array(count);
+			// Arrays will be filled in generateBerries()
+			visibleBerries = new Array(count);
+			instancePositions = new Array(count);
 
 			init();
 
@@ -66,55 +100,7 @@
 				light.position.set( 0, 1, 0 );
 				scene.add( light );
 
-				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 );
-				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
-
-				mesh = new THREE.InstancedMesh( geometry, material, count );
-
-				let i = 0;
-				const offset = ( amount - 1 ) / 2;
-
-				const matrix = new THREE.Matrix4();
-
-				for ( let x = 0; x < amount; x ++ ) {
-
-					for ( let y = 0; y < amount; y ++ ) {
-
-						for ( let z = 0; z < amount; z ++ ) {
-
-							const px = offset - x;
-							const py = offset - y;
-							const pz = offset - z;
-							matrix.setPosition( px, py, pz );
-
-							mesh.setMatrixAt( i, matrix );
-							instancePositions[i] = new THREE.Vector3( px, py, pz );
-							
-							// Assign random berry colors for foraging
-							const rand = Math.random();
-							if ( rand < 0.3 ) {
-								mesh.setColorAt( i, brightCherry ); // 30% bright cherry (targets)
-							} else if ( rand < 0.6 ) {
-								mesh.setColorAt( i, darkCherry );   // 30% dark cherry
-							} else if ( rand < 0.8 ) {
-								mesh.setColorAt( i, greenBerry );   // 20% green
-							} else {
-								mesh.setColorAt( i, darkGreen );    // 20% dark green
-							}
-
-							i ++;
-
-						}
-
-					}
-
-				}
-
-				scene.add( mesh );
-
-				// Ensure GPU gets color & matrix data
-				mesh.instanceMatrix.needsUpdate = true;
-				if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
+				generateBerries();
 
 				renderer = new THREE.WebGLRenderer( { antialias: true } );
 				renderer.setPixelRatio( window.devicePixelRatio );
@@ -131,10 +117,13 @@
 				// stats = new Stats();
 				// document.body.appendChild( stats.dom );
 
+				createUI();
+
 				window.addEventListener( 'resize', onWindowResize );
 				renderer.domElement.addEventListener( 'pointermove', onPointerMove );
 				renderer.domElement.addEventListener( 'pointerdown', onPointerDown );
 				renderer.domElement.addEventListener( 'contextmenu', (e)=>{ e.preventDefault(); e.stopPropagation(); return false; });
+				doneButton.addEventListener( 'click', onTravel );
 				
 				// Completely disable context menu everywhere
 				document.addEventListener('contextmenu', function(e) { e.preventDefault(); return false; });
@@ -154,6 +143,124 @@
 			function onPointerMove( event ) {
 				mouse.x = ( event.clientX / renderer.domElement.clientWidth ) * 2 - 1;
 				mouse.y = - ( event.clientY / renderer.domElement.clientHeight ) * 2 + 1;
+			}
+
+			function generateBerries() {
+				if ( mesh ) {
+					scene.remove( mesh );
+					mesh.geometry.dispose();
+					mesh.material.dispose();
+					mesh = null;
+				}
+				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 );
+				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
+				mesh = new THREE.InstancedMesh( geometry, material, count );
+				visibleBerries.fill( true );
+				const offset = ( amount - 1 ) / 2;
+				const matrix = new THREE.Matrix4();
+				let i = 0;
+				for ( let x = 0; x < amount; x ++ ) {
+					for ( let y = 0; y < amount; y ++ ) {
+						for ( let z = 0; z < amount; z ++ ) {
+							const px = offset - x;
+							const py = offset - y;
+							const pz = offset - z;
+							matrix.setPosition( px, py, pz );
+							mesh.setMatrixAt( i, matrix );
+							instancePositions[i] = new THREE.Vector3( px, py, pz );
+							const rand = Math.random();
+							if ( rand < 0.3 ) mesh.setColorAt( i, brightCherry ); else if ( rand < 0.6 ) mesh.setColorAt( i, darkCherry ); else if ( rand < 0.8 ) mesh.setColorAt( i, greenBerry ); else mesh.setColorAt( i, darkGreen );
+							i++;
+						}
+					}
+				}
+				scene.add( mesh );
+				mesh.instanceMatrix.needsUpdate = true;
+				if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
+			}
+
+			function createUI() {
+				// Button
+				doneButton = document.createElement('button');
+				doneButton.textContent = "I'm done here!";
+				doneButton.style.cssText = 'position:fixed;top:10px;right:10px;z-index:30;padding:10px 18px;font-family:system-ui,Segoe UI,sans-serif;font-size:14px;font-weight:600;cursor:pointer;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;border:none;border-radius:24px;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:filter .25s, transform .15s;';
+				doneButton.onmouseenter = ()=> doneButton.style.filter='brightness(1.15)';
+				doneButton.onmouseleave = ()=> doneButton.style.filter='';
+				doneButton.onmousedown = ()=> doneButton.style.transform='scale(.94)';
+				doneButton.onmouseup = ()=> doneButton.style.transform='';
+				document.body.appendChild( doneButton );
+				// Loading overlay
+				loadingOverlay = document.createElement('div');
+				loadingOverlay.className = 'loading-gradient';
+				loadingOverlay.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:40;';
+				// Travel badge
+				const badge = document.createElement('div');
+				badge.className = 'travel-badge';
+				badge.id = 'travelBadge';
+				badge.textContent = 'TRAVEL 0';
+				loadingOverlay.appendChild( badge );
+				// Spinner
+				const spinner = document.createElement('div');
+				spinner.className = 'loader-spinner';
+				loadingOverlay.appendChild( spinner );
+				// Loading text (dynamic line)
+				loadingText = document.createElement('div');
+				loadingText.className = 'status-line';
+				loadingText.textContent = 'Preparing jump...';
+				loadingOverlay.appendChild( loadingText );
+				// Progress bar
+				const pw = document.createElement('div');
+				pw.className = 'progress-wrapper';
+				const pb = document.createElement('div');
+				pb.className = 'progress-bar';
+				const pf = document.createElement('div');
+				pf.className = 'progress-fill';
+				pf.id = 'progressFill';
+				pb.appendChild( pf );
+				pw.appendChild( pb );
+				loadingOverlay.appendChild( pw );
+				// Append overlay
+				document.body.appendChild( loadingOverlay );
+			}
+
+			function onTravel() {
+				if ( loadingOverlay.style.display !== 'none' && loadingOverlay.style.display !== '' ) return;
+				travelCount++;
+				document.getElementById('travelBadge').textContent = `TRAVEL ${travelCount}`;
+				doneButton.disabled = true;
+				doneButton.style.filter = 'grayscale(1)';
+				doneButton.style.cursor = 'not-allowed';
+				loadingOverlay.style.display = 'flex';
+				const total = 20000; // 20s
+				const start = performance.now();
+				updateProgress(0, total);
+				function frame(now){
+					const elapsed = now - start;
+					const clamped = Math.min(elapsed, total);
+					updateProgress(clamped, total);
+					if ( clamped < total ) requestAnimationFrame(frame); else finishTravel();
+				}
+				requestAnimationFrame(frame);
+			}
+
+			function updateProgress(elapsed, total){
+				const pct = elapsed / total;
+				const secsLeft = Math.ceil((total - elapsed)/1000);
+				const pf = document.getElementById('progressFill');
+				if ( pf ) pf.style.setProperty('--p', (pct*100).toFixed(1)+'%');
+				if ( pf ) pf.style.width = (pct*100)+'%';
+				loadingText.textContent = pct < 1 ? `Spooling field... ${Math.round(pct*100)}% | ${secsLeft}s` : 'Finalizing terrain...';
+			}
+
+			function finishTravel() {
+				generateBerries();
+				loadingText.textContent = 'Deployed!';
+				setTimeout(()=>{
+					loadingOverlay.style.display = 'none';
+					doneButton.disabled = false;
+					doneButton.style.filter = '';
+					doneButton.style.cursor = 'pointer';
+				}, 450);
 			}
 
 			function onPointerDown( event ) {
