@@ -43,10 +43,31 @@
 		</style>
 	</head>
 	<body oncontextmenu="return false;">
+		<!-- STATIC FALLBACK (removed when script succeeds) -->
+		<div id="fallback-guide" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;color:#fff;font:14px system-ui,Segoe UI,sans-serif;z-index:9999;padding:28px;">
+			<div style="max-width:640px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.15);padding:28px 34px;border-radius:22px;line-height:1.5;">
+				<h2 style="margin:0 0 12px;font-size:26px;letter-spacing:.5px;font-weight:600;">Foraging Study – Loading</h2>
+				<p style="margin:0 0 14px;opacity:.85">If you only see the berry cube and not the participant / instruction screens, the JavaScript module may not have loaded. This fallback appears when initialization hasn’t completed.</p>
+				<ol style="margin:0 0 16px 18px;padding:0;">
+					<li>Open this folder with a local server (NOT by double‑click). Example PowerShell: <code>python -m http.server 8000</code> then browse to <code>http://localhost:8000/webgl_instancing_raycast.html</code>.</li>
+					<li>Use a modern Chromium / Firefox (import maps required).</li>
+					<li>Check DevTools Console for errors (press F12) – look for lines starting with <strong>[Foraging]</strong>.</li>
+				</ol>
+				<div style="margin:0 0 10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;font-size:12px;opacity:.85;">Target vs Distractors</div>
+				<ul style="list-style:none;margin:0 0 18px;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:12.5px;">
+					<li style="display:flex;gap:6px;align-items:center;"><span style="width:18px;height:18px;border-radius:50%;background:#ff0040;box-shadow:0 0 4px #ff0040;"></span>Bright Pink = LEFT pick (target)</li>
+					<li style="display:flex;gap:6px;align-items:center;"><span style="width:18px;height:18px;border-radius:50%;background:#8b0000;"></span>Dark Red = RIGHT reject</li>
+					<li style="display:flex;gap:6px;align-items:center;"><span style="width:18px;height:18px;border-radius:50%;background:#228b22;"></span>Green = RIGHT reject</li>
+					<li style="display:flex;gap:6px;align-items:center;"><span style="width:18px;height:18px;border-radius:50%;background:#006400;"></span>Dark Green = RIGHT reject</li>
+				</ul>
+				<p style="margin:0 0 10px;font-size:12.5px;opacity:.8">Controls: rotate = left‑drag empty space; harvest = left click target; reject = right click distractor; travel = "I'm done here!" (20s jump).</p>
+				<p style="margin:0;font-size:12px;opacity:.55">This panel will auto‑hide if the main UI initializes.</p>
+			</div>
+		</div>
 		<script type="importmap">
 			{
 				"imports": {
-					"three": "../build/three.module.js",
+					"three": "./build/three.module.js",
 					"three/addons/": "./jsm/"
 				}
 			}
@@ -66,6 +87,19 @@
 			let instancePositions; // stores Vector3 positions per instance
 			let mesh; // current instanced mesh
 			let loadingOverlay, loadingText, doneButton; // UI elements
+			let participantOverlay, instructionOverlay, appreciationOverlay; // additional overlays
+			let startButton, beginButton, finishButton; // control buttons
+			const maxTrials = 5; // configurable number of trials (travels)
+			let participant = { name: '', age: '', gender: '' };
+			let experimentStartTime = 0;
+			let currentTrialStart = 0;
+			const clickData = []; // per click records
+			const trialData = []; // per trial summary
+			let isTargetInstance = []; // boolean per instance for reliable classification
+			let lastClickGlobalTime = null; // for inter-click RT
+			let lastSummarizedTrial = 0; // avoid duplicate summaries
+			let estimatedRefreshHz = null; // estimated display refresh rate
+			const layoutData = []; // per-trial berry layout snapshot (targets/distractors before any clicks)
 
 			const amount = parseInt( window.location.search.slice( 1 ) ) || 10;
 			const count = Math.pow( amount, 3 );
@@ -89,6 +123,7 @@
 			init();
 
 			function init() {
+				console.log('[Foraging] init start');
 
 				camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 100 );
 				camera.position.set( amount, amount, amount );
@@ -118,6 +153,8 @@
 				// document.body.appendChild( stats.dom );
 
 				createUI();
+				createParticipantForm();
+				installRecoveryWatchdog();
 
 				window.addEventListener( 'resize', onWindowResize );
 				renderer.domElement.addEventListener( 'pointermove', onPointerMove );
@@ -129,6 +166,35 @@
 				document.addEventListener('contextmenu', function(e) { e.preventDefault(); return false; });
 				window.addEventListener('contextmenu', function(e) { e.preventDefault(); return false; });
 
+			}
+
+			function installRecoveryWatchdog(){
+				let attempts = 0;
+				const maxAttempts = 8;
+				const interval = setInterval(()=>{
+					attempts++;
+					if(experimentStartTime) { clearInterval(interval); return; }
+					const hasOverlay = !!document.querySelector('[data-role="participant-overlay"], [data-role="instruction-overlay"]');
+					if(!hasOverlay){
+						console.warn('[Foraging] Overlay missing – rebuilding (attempt '+attempts+')');
+						try { createParticipantForm(); } catch(e) { console.error('Failed recreate form', e); }
+					}
+					if(attempts>=maxAttempts) clearInterval(interval);
+				}, 1200);
+				window.addEventListener('error', (e)=>{
+					console.error('[Foraging] Global error', e.message);
+					showEmergencyNotice(e.message);
+				});
+			}
+
+			function showEmergencyNotice(msg){
+				if(document.getElementById('foraging-emergency')) return;
+				const div = document.createElement('div');
+				div.id='foraging-emergency';
+				div.style.cssText='position:fixed;top:10px;left:10px;z-index:400;background:#300;padding:10px 14px;color:#fff;font:12px/1.4 system-ui;border:1px solid #f55;border-radius:8px;max-width:260px;';
+				div.innerHTML = '<b>UI Recovery</b><br>'+ (msg||'Unknown error') + '<br><button style="margin-top:6px;padding:4px 8px;border:none;background:#f55;color:#fff;border-radius:4px;cursor:pointer;font-weight:600;">Recreate Form</button>';
+				div.querySelector('button').onclick=()=>{ createParticipantForm(); };
+				document.body.appendChild(div);
 			}
 
 			function onWindowResize() {
@@ -156,6 +222,7 @@
 				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
 				mesh = new THREE.InstancedMesh( geometry, material, count );
 				visibleBerries.fill( true );
+				if(isTargetInstance.length !== count) isTargetInstance = new Array(count);
 				const offset = ( amount - 1 ) / 2;
 				const matrix = new THREE.Matrix4();
 				let i = 0;
@@ -169,7 +236,10 @@
 							mesh.setMatrixAt( i, matrix );
 							instancePositions[i] = new THREE.Vector3( px, py, pz );
 							const rand = Math.random();
-							if ( rand < 0.3 ) mesh.setColorAt( i, brightCherry ); else if ( rand < 0.6 ) mesh.setColorAt( i, darkCherry ); else if ( rand < 0.8 ) mesh.setColorAt( i, greenBerry ); else mesh.setColorAt( i, darkGreen );
+							if ( rand < 0.3 ) { mesh.setColorAt( i, brightCherry ); isTargetInstance[i] = true; }
+							else if ( rand < 0.6 ) { mesh.setColorAt( i, darkCherry ); isTargetInstance[i] = false; }
+							else if ( rand < 0.8 ) { mesh.setColorAt( i, greenBerry ); isTargetInstance[i] = false; }
+							else { mesh.setColorAt( i, darkGreen ); isTargetInstance[i] = false; }
 							i++;
 						}
 					}
@@ -180,51 +250,248 @@
 			}
 
 			function createUI() {
-				// Button
-				doneButton = document.createElement('button');
-				doneButton.textContent = "I'm done here!";
-				doneButton.style.cssText = 'position:fixed;top:10px;right:10px;z-index:30;padding:10px 18px;font-family:system-ui,Segoe UI,sans-serif;font-size:14px;font-weight:600;cursor:pointer;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;border:none;border-radius:24px;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:filter .25s, transform .15s;';
-				doneButton.onmouseenter = ()=> doneButton.style.filter='brightness(1.15)';
-				doneButton.onmouseleave = ()=> doneButton.style.filter='';
-				doneButton.onmousedown = ()=> doneButton.style.transform='scale(.94)';
-				doneButton.onmouseup = ()=> doneButton.style.transform='';
-				document.body.appendChild( doneButton );
-				// Loading overlay
-				loadingOverlay = document.createElement('div');
-				loadingOverlay.className = 'loading-gradient';
-				loadingOverlay.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:40;';
-				// Travel badge
-				const badge = document.createElement('div');
-				badge.className = 'travel-badge';
-				badge.id = 'travelBadge';
+ 				// Travel button
+ 				doneButton = document.createElement('button');
+ 				doneButton.textContent = "I'm done here!";
+ 				doneButton.style.cssText = 'position:fixed;top:10px;right:10px;z-index:30;padding:10px 18px;font-family:system-ui,Segoe UI,sans-serif;font-size:14px;font-weight:600;cursor:pointer;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;border:none;border-radius:24px;box-shadow:0 4px 12px rgba(0,0,0,.4);transition:filter .25s, transform .15s;opacity:.55;';
+ 				doneButton.disabled = true; // enabled after experiment actually begins
+ 				doneButton.onmouseenter = ()=> { if(!doneButton.disabled) doneButton.style.filter='brightness(1.15)'; };
+ 				doneButton.onmouseleave = ()=> doneButton.style.filter='';
+ 				doneButton.onmousedown = ()=> { if(!doneButton.disabled) doneButton.style.transform='scale(.94)'; };
+ 				doneButton.onmouseup = ()=> doneButton.style.transform='';
+ 				document.body.appendChild( doneButton );
+
+ 				// Loading / travel overlay
+ 				loadingOverlay = document.createElement('div');
+ 				loadingOverlay.className = 'loading-gradient';
+ 				loadingOverlay.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:40;';
+ 				const badge = document.createElement('div');
+ 				badge.className = 'travel-badge';
+ 				badge.id = 'travelBadge';
 				badge.textContent = 'TRAVEL 0';
 				loadingOverlay.appendChild( badge );
-				// Spinner
-				const spinner = document.createElement('div');
-				spinner.className = 'loader-spinner';
-				loadingOverlay.appendChild( spinner );
-				// Loading text (dynamic line)
-				loadingText = document.createElement('div');
-				loadingText.className = 'status-line';
-				loadingText.textContent = 'Preparing jump...';
-				loadingOverlay.appendChild( loadingText );
-				// Progress bar
-				const pw = document.createElement('div');
-				pw.className = 'progress-wrapper';
-				const pb = document.createElement('div');
-				pb.className = 'progress-bar';
-				const pf = document.createElement('div');
-				pf.className = 'progress-fill';
-				pf.id = 'progressFill';
-				pb.appendChild( pf );
-				pw.appendChild( pb );
-				loadingOverlay.appendChild( pw );
-				// Append overlay
+				const spinner = document.createElement('div'); spinner.className = 'loader-spinner'; loadingOverlay.appendChild( spinner );
+				loadingText = document.createElement('div'); loadingText.className = 'status-line'; loadingText.textContent = 'Preparing jump...'; loadingOverlay.appendChild( loadingText );
+				const pw = document.createElement('div'); pw.className = 'progress-wrapper';
+				const pb = document.createElement('div'); pb.className = 'progress-bar';
+				const pf = document.createElement('div'); pf.className = 'progress-fill'; pf.id = 'progressFill';
+				pb.appendChild( pf ); pw.appendChild( pb ); loadingOverlay.appendChild( pw );
 				document.body.appendChild( loadingOverlay );
+
+ 			function createInstructionOverlay(){
+				instructionOverlay = document.createElement('div');
+				instructionOverlay.style.cssText='position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 40% 35%,#140016,#050505 70%);color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:90;flex-direction:column;padding:24px;';
+				const wrap = document.createElement('div');
+				wrap.style.cssText='max-width:760px;width:100%;display:grid;gap:26px;background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);padding:36px 44px;border-radius:30px;box-shadow:0 14px 50px -10px #ff004060,0 0 0 1px rgba(255,255,255,0.09);';
+				wrap.innerHTML = `
+					<div>
+						<h2 style='margin:0 0 10px;font-weight:600;letter-spacing:.5px;font-size:30px;'>Instructions</h2>
+						<p style='margin:0;line-height:1.5;font-size:15px;opacity:.9'>Harvest the <strong style='color:#ff4d7a;'>bright pink cherries</strong>. Other berries are distractors—feel free to reject them. Each environment patch is a 3D cluster of berries you can rotate and inspect before moving on. After you're done harvesting in a patch, press <em>"I'm done here!"</em> to travel. There are <strong>${maxTrials}</strong> patches total.</p>
+					</div>
+					<div style='display:grid;gap:16px;'>
+						<div style='font-weight:600;letter-spacing:.5px;font-size:12.5px;opacity:.85;text-transform:uppercase;'>Color Legend</div>
+						<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;'>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#ff0040;box-shadow:0 0 6px #ff0040 inset,0 0 6px #ff3f7f;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#ff5d8f;'>Bright Pink</strong><br><em style='opacity:.7'>TARGET — left click to harvest</em></div>
+							</div>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#8b0000;box-shadow:0 0 6px #8b0000 inset;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#ff9a85;'>Dark Red</strong><br><em style='opacity:.7'>DISTRACTOR — right click to reject</em></div>
+							</div>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#228b22;box-shadow:0 0 6px #228b22 inset;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#4ad54a;'>Green</strong><br><em style='opacity:.7'>DISTRACTOR — right click to reject</em></div>
+							</div>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#006400;box-shadow:0 0 6px #006400 inset;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#35c835;'>Dark Green</strong><br><em style='opacity:.7'>DISTRACTOR — right click to reject</em></div>
+							</div>
+						</div>
+					</div>
+					<div style='display:grid;gap:10px;'>
+						<div style='font-weight:600;letter-spacing:.5px;font-size:12.5px;opacity:.85;text-transform:uppercase;'>Controls</div>
+						<ul style='margin:0;padding:0;list-style:none;display:grid;gap:8px;font-size:13.2px;line-height:1.45;'>
+							<li><strong style='color:#ff5d8f;'>Rotate View:</strong> Click & drag empty space (left mouse) to orbit.</li>
+							<li><strong style='color:#ffca7a;'>Harvest Target:</strong> LEFT click bright pink cherry.</li>
+							<li><strong style='color:#ffa07a;'>Reject Distractor:</strong> RIGHT click any non-pink berry.</li>
+							<li><strong style='color:#ffc34d;'>Travel:</strong> Press the <em>"I'm done here!"</em> button when satisfied; next patch loads after a ~20s jump sequence.</li>
+						</ul>
+					</div>
+					<div style='font-size:12px;opacity:.6;'>Data (clicks & timing) is recorded continuously until the final patch.</div>
+					<div style='display:flex;justify-content:center;'>
+						<button id='beginBtn' style='margin-top:4px;padding:14px 34px;font-size:16px;font-weight:600;border:none;border-radius:18px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 8px 24px -8px #ff0040b0,0 0 0 1px rgba(255,255,255,0.16);letter-spacing:.5px;'>Begin Foraging ▶</button>
+					</div>
+				`;
+				instructionOverlay.appendChild(wrap);
+				document.body.appendChild(instructionOverlay);
+				beginButton = wrap.querySelector('#beginBtn');
+				beginButton.addEventListener('click', ()=>{
+					if(experimentStartTime) return; // already started
+					experimentStartTime = performance.now();
+					travelCount = 1;
+					currentTrialStart = performance.now();
+					lastClickGlobalTime = null;
+					estimateRefreshRate();
+					document.getElementById('travelBadge').textContent = `TRAVEL ${travelCount}`;
+					doneButton.disabled = false; doneButton.style.opacity = 1;
+					recordLayoutSnapshot(travelCount); // capture initial layout BEFORE any clicks
+					instructionOverlay.style.opacity = 1;
+					instructionOverlay.style.transition='opacity .55s';
+					instructionOverlay.style.opacity=0;
+					setTimeout(()=> instructionOverlay.remove(), 600);
+				});
+			}
+				// (duplicate construction removed – already built above)
+			}
+
+			function createParticipantForm() {
+				participantOverlay = document.createElement('div');
+				participantOverlay.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 40% 35%,#1a001d,#030303 70%);color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:100;flex-direction:column;padding:20px;';
+				participantOverlay.setAttribute('data-role','participant-overlay');
+				const fb = document.getElementById('fallback-guide'); if(fb) fb.remove();
+				const panel = document.createElement('div');
+				panel.style.cssText = 'background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);padding:28px 36px;border-radius:24px;box-shadow:0 10px 40px -10px #ff004080,0 0 0 1px rgba(255,255,255,0.08);max-width:420px;width:100%;';
+				panel.innerHTML = `
+					<h2 style="margin:0 0 10px;font-weight:600;letter-spacing:.5px">Participant Info</h2>
+					<p style="margin:0 0 18px;line-height:1.45;font-size:14px;opacity:.85">Enter your details. You'll see full color legend & controls next.</p>
+					<label style='display:block;font-size:13px;margin:0 0 4px'>Name</label>
+					<input id='pName' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 14px;font-size:14px' placeholder='Your name' />
+					<label style='display:block;font-size:13px;margin:0 0 4px'>Age</label>
+					<input id='pAge' type='number' min='0' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 14px;font-size:14px' placeholder='Age' />
+					<label style='display:block;font-size:13px;margin:0 0 4px'>Gender</label>
+					<select id='pGender' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 26px;font-size:14px'>
+						<option value='' disabled selected hidden>Select</option>
+						<option value='female'>Female</option>
+						<option value='male'>Male</option>
+						<option value='nonbinary'>Non-binary</option>
+						<option value='prefer_not'>Prefer not to say</option>
+					</select>
+					<button id='startBtn' style='width:100%;padding:12px 16px;font-size:15px;font-weight:600;border:none;border-radius:14px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 6px 18px -6px #ff0040b0,0 0 0 1px rgba(255,255,255,0.15);'>Continue →</button>
+				`;
+				participantOverlay.appendChild(panel);
+				document.body.appendChild(participantOverlay);
+				startButton = panel.querySelector('#startBtn');
+				startButton.addEventListener('click', ()=>{
+					const name = panel.querySelector('#pName').value.trim();
+					const age = panel.querySelector('#pAge').value.trim();
+					const gender = panel.querySelector('#pGender').value;
+					if(!name || !age || !gender){
+						startButton.textContent = 'Fill all fields';
+						setTimeout(()=> startButton.textContent='Continue →', 1400);
+						return;
+					}
+					participant = { name, age, gender };
+					participantOverlay.style.opacity = 1;
+					participantOverlay.style.transition = 'opacity .45s';
+					participantOverlay.style.opacity = 0;
+					setTimeout(()=>{ participantOverlay.remove(); createInstructionOverlay(); }, 480);
+				});
+			}
+
+			function createInstructionOverlay(){
+				instructionOverlay = document.createElement('div');
+				instructionOverlay.style.cssText='position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 40% 35%,#140016,#050505 70%);color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:95;flex-direction:column;padding:24px;';
+				instructionOverlay.setAttribute('data-role','instruction-overlay');
+				const wrap = document.createElement('div');
+				wrap.style.cssText='max-width:760px;width:100%;display:grid;gap:26px;background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);padding:36px 44px;border-radius:30px;box-shadow:0 14px 50px -10px #ff004060,0 0 0 1px rgba(255,255,255,0.09);';
+				wrap.innerHTML = `
+					<div>
+						<h2 style='margin:0 0 10px;font-weight:600;letter-spacing:.5px;font-size:30px;'>Instructions</h2>
+						<p style='margin:0;line-height:1.5;font-size:15px;opacity:.9'>Harvest the <strong style='color:#ff4d7a;'>bright pink cherries</strong>. Other berries are distractors—reject or ignore them. Rotate the cluster before deciding to travel. There are <strong>${maxTrials}</strong> patches.</p>
+					</div>
+					<div style='display:grid;gap:16px;'>
+						<div style='font-weight:600;letter-spacing:.5px;font-size:12.5px;opacity:.85;text-transform:uppercase;'>Color Legend</div>
+						<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;'>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#ff0040;box-shadow:0 0 6px #ff0040 inset,0 0 6px #ff3f7f;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#ff5d8f;'>Bright Pink</strong><br><em style='opacity:.7'>Target — LEFT click</em></div>
+							</div>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#8b0000;box-shadow:0 0 6px #8b0000 inset;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#ff9a85;'>Dark Red</strong><br><em style='opacity:.7'>Distractor — RIGHT click</em></div>
+							</div>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#228b22;box-shadow:0 0 6px #228b22 inset;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#4ad54a;'>Green</strong><br><em style='opacity:.7'>Distractor — RIGHT click</em></div>
+							</div>
+							<div style='display:flex;gap:10px;'>
+								<span style='width:26px;height:26px;border-radius:50%;background:#006400;box-shadow:0 0 6px #006400 inset;'></span>
+								<div style='font-size:13px;line-height:1.35'><strong style='color:#35c835;'>Dark Green</strong><br><em style='opacity:.7'>Distractor — RIGHT click</em></div>
+							</div>
+						</div>
+					</div>
+					<div style='display:grid;gap:10px;'>
+						<div style='font-weight:600;letter-spacing:.5px;font-size:12.5px;opacity:.85;text-transform:uppercase;'>Controls</div>
+						<ul style='margin:0;padding:0;list-style:none;display:grid;gap:8px;font-size:13.2px;line-height:1.45;'>
+							<li><strong style='color:#ff5d8f;'>Rotate:</strong> Click & drag empty space (left mouse)</li>
+							<li><strong style='color:#ffca7a;'>Harvest:</strong> LEFT click bright pink target</li>
+							<li><strong style='color:#ffa07a;'>Reject:</strong> RIGHT click any distractor</li>
+							<li><strong style='color:#ffc34d;'>Travel:</strong> Use "I'm done here!" (20s jump)</li>
+						</ul>
+					</div>
+					<div style='font-size:12px;opacity:.6;'>Clicks & timing logged until last patch.</div>
+					<div style='display:flex;gap:12px;justify-content:center;margin-top:4px;'>
+						<button id='backInfoBtn' style='padding:12px 20px;font-size:14px;font-weight:600;border:none;border-radius:14px;background:#444;color:#fff;cursor:pointer;'>← Back</button>
+						<button id='beginBtn' style='padding:14px 32px;font-size:16px;font-weight:600;border:none;border-radius:18px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 8px 24px -8px #ff0040b0,0 0 0 1px rgba(255,255,255,0.16);letter-spacing:.5px;'>Begin ▶</button>
+					</div>`;
+				instructionOverlay.appendChild(wrap);
+				document.body.appendChild(instructionOverlay);
+				const backBtn = wrap.querySelector('#backInfoBtn');
+				beginButton = wrap.querySelector('#beginBtn');
+				backBtn.addEventListener('click', ()=>{
+					instructionOverlay.remove();
+					createParticipantForm();
+				});
+				beginButton.addEventListener('click', ()=>{
+					if(experimentStartTime) return;
+					experimentStartTime = performance.now();
+					travelCount = 1;
+					currentTrialStart = performance.now();
+					lastClickGlobalTime = null;
+					estimateRefreshRate();
+					document.getElementById('travelBadge').textContent = `TRAVEL ${travelCount}`;
+					doneButton.disabled = false; doneButton.style.opacity = 1;
+					instructionOverlay.style.opacity = 1;
+					instructionOverlay.style.transition='opacity .5s';
+					instructionOverlay.style.opacity = 0;
+					setTimeout(()=> instructionOverlay.remove(), 520);
+				});
+			}
+
+			// Fallback: if overlays fail to appear, recreate on load
+			window.addEventListener('load', ()=>{
+				setTimeout(()=>{
+					if(!participantOverlay && !experimentStartTime) {
+						createParticipantForm();
+					}
+				}, 800);
+			});
+
+			function ensureAppreciationOverlay(){
+				if(appreciationOverlay) return;
+				appreciationOverlay = document.createElement('div');
+				appreciationOverlay.style.cssText='position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;background:radial-gradient(circle at 40% 35%,#1d001d,#060606 70%);color:#fff;font-family:system-ui,Segoe UI,sans-serif;z-index:120;padding:30px;text-align:center;';
+				appreciationOverlay.innerHTML = `
+					<h2 style='margin:0 0 12px;font-size:30px;font-weight:600;letter-spacing:.5px'>Thank You!</h2>
+					<p style='max-width:560px;line-height:1.45;font-size:15px;opacity:.9;margin:0 0 26px'>Your participation helps us understand visual foraging behavior. A CSV file download should have started automatically. You can also download it again below.</p>
+					<div style='display:flex;gap:14px;flex-wrap:wrap;justify-content:center'>
+						<button id='downloadAgainBtn' style='padding:12px 20px;font-size:15px;font-weight:600;border:none;border-radius:14px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 6px 18px -6px #ff0040b0,0 0 0 1px rgba(255,255,255,0.15);'>Download Data Again</button>
+					</div>
+				`;
+				document.body.appendChild(appreciationOverlay);
+				appreciationOverlay.querySelector('#downloadAgainBtn').addEventListener('click', exportCSV);
 			}
 
 			function onTravel() {
 				if ( loadingOverlay.style.display !== 'none' && loadingOverlay.style.display !== '' ) return;
+				if(!experimentStartTime) return; // guard if experiment not begun
+				// finalize current trial summary
+				summarizeCurrentTrial();
+				if ( travelCount >= maxTrials ) { // finish experiment instead of new travel
+					endExperiment(true); // already summarized
+					return;
+				}
 				travelCount++;
 				document.getElementById('travelBadge').textContent = `TRAVEL ${travelCount}`;
 				doneButton.disabled = true;
@@ -254,12 +521,15 @@
 
 			function finishTravel() {
 				generateBerries();
+				recordLayoutSnapshot(travelCount); // capture new patch layout before interaction
 				loadingText.textContent = 'Deployed!';
 				setTimeout(()=>{
 					loadingOverlay.style.display = 'none';
 					doneButton.disabled = false;
 					doneButton.style.filter = '';
 					doneButton.style.cursor = 'pointer';
+					currentTrialStart = performance.now();
+					lastClickGlobalTime = null;
 				}, 450);
 			}
 
@@ -269,6 +539,7 @@
 				lastPickTime = now;
 				const btn = event.button;
 				if ( btn !== 0 && btn !== 2 ) return;
+				if(!experimentStartTime) return; // ignore clicks before start
 				const rect = renderer.domElement.getBoundingClientRect();
 				const cx = event.clientX - rect.left;
 				const cy = event.clientY - rect.top;
@@ -281,7 +552,30 @@
 				visibleBerries[picked] = false;
 				const hideMatrix = new THREE.Matrix4(); hideMatrix.setPosition( 1e6, 1e6, 1e6 );
 				mesh.setMatrixAt( picked, hideMatrix ); mesh.instanceMatrix.needsUpdate = true;
-				console.log( btn===0 ? 'PICKED id='+picked : 'NOT_PICKED id='+picked );
+				const colorHex = color.getHexString();
+				const isTarget = !!isTargetInstance[picked];
+				const action = btn === 0 ? 'LEFT_PICK' : 'RIGHT_REJECT';
+				const globalTimeMs = Math.round(now - experimentStartTime);
+				const trialTimeMs = Math.round(now - currentTrialStart);
+				let rtPrevMs = '';
+				if(lastClickGlobalTime !== null) rtPrevMs = globalTimeMs - lastClickGlobalTime;
+				lastClickGlobalTime = globalTimeMs;
+				clickData.push({
+					participant: participant.name,
+					age: participant.age,
+					gender: participant.gender,
+					trial: travelCount,
+					globalTimeMs,
+					trialTimeMs,
+					rtPrevMs,
+					instanceId: picked,
+					colorHex: '0x'+colorHex,
+					colorCategory: isTarget ? 'TARGET' : 'DISTRACTOR',
+					action,
+					screenX: event.clientX,
+					screenY: event.clientY
+				});
+				console.log( action + ' id='+picked + ' color='+colorHex + ' target='+isTarget );
 			}
 
 			// Attempt raycast first, fallback to screen-space nearest instance
@@ -315,6 +609,108 @@
 
 			// legacy helper kept empty
 			function hideBerry() {}
+
+			function summarizeCurrentTrial(){
+				if(!experimentStartTime || travelCount === 0) return;
+				if(lastSummarizedTrial === travelCount) return; // already done
+				const trialClicks = clickData.filter(c=> c.trial === travelCount);
+				if(!trialClicks.length) { // still push empty summary
+					trialData.push({ trial: travelCount, targetsPicked:0, targetsRejected:0, distractorsPicked:0, distractorsRejected:0, totalClicks:0 });
+					lastSummarizedTrial = travelCount;
+					return;
+				}
+				let targetsPicked=0, targetsRejected=0, distractorsPicked=0, distractorsRejected=0;
+				trialClicks.forEach(c=>{
+					if(c.colorCategory==='TARGET') {
+						if(c.action==='LEFT_PICK') targetsPicked++; else targetsRejected++;
+					} else {
+						if(c.action==='LEFT_PICK') distractorsPicked++; else distractorsRejected++;
+					}
+				});
+				trialData.push({ trial: travelCount, targetsPicked, targetsRejected, distractorsPicked, distractorsRejected, totalClicks: trialClicks.length });
+				lastSummarizedTrial = travelCount;
+			}
+
+			function endExperiment(alreadySummarized=false){
+				// finalize last trial if not already summarized
+				if(!alreadySummarized) summarizeCurrentTrial();
+				exportCSV();
+				ensureAppreciationOverlay();
+				appreciationOverlay.style.display='flex';
+			}
+
+			function exportCSV(){
+				const lines = [];
+				lines.push('participant,name,'+participant.name);
+				lines.push('participant,age,'+participant.age);
+				lines.push('participant,gender,'+participant.gender);
+				lines.push('meta,maxTrials,'+maxTrials);
+				lines.push('meta,screenWidth,'+window.innerWidth);
+				lines.push('meta,screenHeight,'+window.innerHeight);
+				lines.push('meta,refreshHz,'+(estimatedRefreshHz || 'NA'));
+				lines.push('');
+				lines.push('TRIAL_LAYOUT');
+				lines.push('trial,targetCount,distractorCount,targetIds,distractorIds');
+				layoutData.forEach(l=>{
+					lines.push([l.trial,l.targetCount,l.distractorCount,'['+l.targetIds.join(' ')+']','['+l.distractorIds.join(' ')+']'].join(','));
+				});
+				lines.push('');
+				lines.push('CLICK_DATA');
+				lines.push('participant,age,gender,trial,globalTimeMs,trialTimeMs,rtPrevMs,instanceId,colorHex,colorCategory,action,screenX,screenY');
+				clickData.forEach(c=>{
+					lines.push([c.participant,c.age,c.gender,c.trial,c.globalTimeMs,c.trialTimeMs,c.rtPrevMs,c.instanceId,c.colorHex,c.colorCategory,c.action,c.screenX,c.screenY].join(','));
+				});
+				lines.push('');
+				lines.push('TRIAL_SUMMARY');
+				lines.push('trial,targetsPicked,targetsRejected,distractorsPicked,distractorsRejected,totalClicks');
+				trialData.forEach(t=>{
+					lines.push([t.trial,t.targetsPicked,t.targetsRejected,t.distractorsPicked,t.distractorsRejected,t.totalClicks].join(','));
+				});
+				const csv = lines.join('\n');
+				const blob = new Blob([csv], { type: 'text/csv' });
+				const stamp = new Date().toISOString().replace(/[:T]/g,'-').split('.')[0];
+				const safeName = participant.name.replace(/[^a-z0-9_-]+/gi,'_');
+				const fileName = `${safeName || 'participant'}_${participant.age || 'NA'}_${participant.gender || 'NA'}_${stamp}.csv`;
+				const a = document.createElement('a');
+				a.href = URL.createObjectURL(blob);
+				a.download = fileName;
+				document.body.appendChild(a);
+				a.click();
+				setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+			}
+
+			function estimateRefreshRate(){
+				// Measure ~60 frame intervals and average
+				const samples = [];
+				let lastTs = null;
+				function frame(ts){
+					if(lastTs !== null){ samples.push(ts - lastTs); }
+					lastTs = ts;
+					if(samples.length < 60) requestAnimationFrame(frame); else {
+						const avg = samples.reduce((a,b)=>a+b,0)/samples.length;
+						if(avg>0) estimatedRefreshHz = Math.round(1000/avg);
+					}
+				}
+				requestAnimationFrame(frame);
+			}
+
+			function recordLayoutSnapshot(trial){
+				// Avoid duplicate snapshot for same trial (e.g., accidental second call)
+				if(layoutData.length && layoutData[layoutData.length-1].trial === trial) return;
+				const targetIds = [];
+				const distractorIds = [];
+				for(let i=0;i<count;i++){
+					if(!visibleBerries[i]) continue; // all visible at start, check anyway
+					if(isTargetInstance[i]) targetIds.push(i); else distractorIds.push(i);
+				}
+				layoutData.push({
+					trial,
+					targetCount: targetIds.length,
+					distractorCount: distractorIds.length,
+					targetIds,
+					distractorIds
+				});
+			}
 
 			function animate() {
 
