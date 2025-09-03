@@ -545,6 +545,10 @@
 			function finishTravel() {
 				generateBerries();
 				recordLayoutSnapshot(travelCount); // capture new patch layout before interaction
+				// Reset camera to standard view for each new patch
+				camera.position.set( amount, amount, amount );
+				camera.lookAt( 0, 0, 0 );
+				controls.reset(); // reset orbit controls to initial state
 				loadingText.textContent = 'Deployed!';
 				setTimeout(()=>{
 					loadingOverlay.style.display = 'none';
