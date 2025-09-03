@@ -100,6 +100,9 @@
 			let lastSummarizedTrial = 0; // avoid duplicate summaries
 			let estimatedRefreshHz = null; // estimated display refresh rate
 			const layoutData = []; // per-trial berry layout snapshot (targets/distractors before any clicks)
+			let practiceMode = false; // true during practice phase (no data logging)
+			let practiceControlPanel = null; // floating panel with Begin Main during practice
+			let suppressOverlayRecovery = false; // disables watchdog while practice/main active
 
 			const amount = parseInt( window.location.search.slice( 1 ) ) || 10;
 			const count = Math.pow( amount, 3 );
@@ -121,6 +124,8 @@
 			instancePositions = new Array(count);
 
 			init();
+			// Generate initial field (will be replaced for practice or main start)
+			generateBerries();
 
 			function init() {
 				console.log('[Foraging] init start');
@@ -173,7 +178,7 @@
 				const maxAttempts = 8;
 				const interval = setInterval(()=>{
 					attempts++;
-					if(experimentStartTime) { clearInterval(interval); return; }
+					if(experimentStartTime || practiceMode || suppressOverlayRecovery) { return; }
 					const hasOverlay = !!document.querySelector('[data-role="participant-overlay"], [data-role="instruction-overlay"]');
 					if(!hasOverlay){
 						console.warn('[Foraging] Overlay missing – rebuilding (attempt '+attempts+')');
@@ -219,6 +224,11 @@
 					mesh = null;
 				}
 				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 );
+				if(practiceMode){
+					// In practice we use a smaller randomized set; delegate and exit.
+					generatePracticeBerries();
+					return;
+				}
 				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
 				mesh = new THREE.InstancedMesh( geometry, material, count );
 				visibleBerries.fill( true );
@@ -432,31 +442,44 @@
 					</div>
 					<div style='font-size:12px;opacity:.6;'>Clicks & timing logged until last patch.</div>
 					<div style='display:flex;gap:12px;justify-content:center;margin-top:4px;'>
-						<button id='backInfoBtn' style='padding:12px 20px;font-size:14px;font-weight:600;border:none;border-radius:14px;background:#444;color:#fff;cursor:pointer;'>← Back</button>
-						<button id='beginBtn' style='padding:14px 32px;font-size:16px;font-weight:600;border:none;border-radius:18px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 8px 24px -8px #ff0040b0,0 0 0 1px rgba(255,255,255,0.16);letter-spacing:.5px;'>Begin ▶</button>
+							<button id='backInfoBtn' style='padding:12px 20px;font-size:14px;font-weight:600;border:none;border-radius:14px;background:#444;color:#fff;cursor:pointer;'>← Back</button>
+							<button id='practiceBtn' style='padding:14px 28px;font-size:15px;font-weight:600;border:none;border-radius:18px;background:#555;color:#fff;cursor:pointer;'>Start Practice</button>
+							<button id='beginBtn' style='padding:14px 32px;font-size:16px;font-weight:600;border:none;border-radius:18px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 8px 24px -8px #ff0040b0,0 0 0 1px rgba(255,255,255,0.16);letter-spacing:.5px;display:none;'>Begin Main ▶</button>
 					</div>`;
 				instructionOverlay.appendChild(wrap);
 				document.body.appendChild(instructionOverlay);
 				const backBtn = wrap.querySelector('#backInfoBtn');
+					const practiceBtn = wrap.querySelector('#practiceBtn');
 				beginButton = wrap.querySelector('#beginBtn');
 				backBtn.addEventListener('click', ()=>{
+					if(practiceMode){
+						console.log('[Practice] Back button ignored during practice');
+						return;
+					}
+					console.log('[UI] Back to participant form');
 					instructionOverlay.remove();
 					createParticipantForm();
 				});
-				beginButton.addEventListener('click', ()=>{
-					if(experimentStartTime) return;
-					experimentStartTime = performance.now();
-					travelCount = 1;
-					currentTrialStart = performance.now();
-					lastClickGlobalTime = null;
-					estimateRefreshRate();
-					document.getElementById('travelBadge').textContent = `TRAVEL ${travelCount}`;
-					doneButton.disabled = false; doneButton.style.opacity = 1;
-					instructionOverlay.style.opacity = 1;
-					instructionOverlay.style.transition='opacity .5s';
-					instructionOverlay.style.opacity = 0;
-					setTimeout(()=> instructionOverlay.remove(), 520);
-				});
+					practiceBtn.addEventListener('click', ()=>{
+						if(practiceMode) return;
+						practiceMode = true;
+						suppressOverlayRecovery = true;
+						practiceBtn.disabled = true; practiceBtn.style.opacity = .5;
+					// disable back button while practicing to avoid accidental navigation
+					backBtn.disabled = true; backBtn.style.opacity = .35; backBtn.style.pointerEvents='none';
+					console.log('[Practice] Starting practice mode');
+						generatePracticeBerries();
+						createPracticeHint();
+						// remove overlay entirely so user can interact with scene
+						instructionOverlay.style.transition='opacity .45s';
+						instructionOverlay.style.opacity=0;
+						setTimeout(()=>{ instructionOverlay.remove(); createPracticeControlPanel(); }, 480);
+						// safety: regenerate in case earlier call occurred before WebGL ready
+						setTimeout(()=>{ if(practiceMode && !mesh) { console.log('[Practice] Retrying practice berry generation'); generatePracticeBerries(); } }, 800);
+						// hide travel button during practice (no meaning yet)
+						doneButton.style.display='none';
+					});
+				beginButton.addEventListener('click', startMainExperiment);
 			}
 
 			// Fallback: if overlays fail to appear, recreate on load
@@ -539,7 +562,7 @@
 				lastPickTime = now;
 				const btn = event.button;
 				if ( btn !== 0 && btn !== 2 ) return;
-				if(!experimentStartTime) return; // ignore clicks before start
+				if(!experimentStartTime && !practiceMode) return; // ignore clicks before start (unless practice)
 				const rect = renderer.domElement.getBoundingClientRect();
 				const cx = event.clientX - rect.left;
 				const cy = event.clientY - rect.top;
@@ -555,6 +578,11 @@
 				const colorHex = color.getHexString();
 				const isTarget = !!isTargetInstance[picked];
 				const action = btn === 0 ? 'LEFT_PICK' : 'RIGHT_REJECT';
+				if(practiceMode){
+					const correct = (btn === 0 && isTarget) || (btn === 2 && !isTarget);
+					showPracticeFeedback(correct, isTarget, action, event.clientX, event.clientY);
+					return; // do not log data during practice
+				}
 				const globalTimeMs = Math.round(now - experimentStartTime);
 				const trialTimeMs = Math.round(now - currentTrialStart);
 				let rtPrevMs = '';
@@ -710,6 +738,137 @@
 					targetIds,
 					distractorIds
 				});
+			}
+
+			// ---------------- PRACTICE MODE SUPPORT ----------------
+			let practiceHintEl = null;
+			function generatePracticeBerries(){
+				// simplified small set for practice (regardless of amount)
+				console.log('[Practice] Generating practice berries');
+				const practiceTotal = Math.min(60, count); // smaller for practice
+				isTargetInstance = new Array(count).fill(false);
+				visibleBerries = new Array(count).fill(false);
+				instancePositions = new Array(count);
+				if(mesh){ scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
+				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 ); // same as main
+				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } ); // same as main
+				mesh = new THREE.InstancedMesh( geometry, material, count );
+				mesh.instanceMatrix.setUsage( THREE.DynamicDrawUsage );
+				
+				// Create a smaller 4x4x4 grid for practice (centered around origin)
+				const practiceAmount = 4;
+				const offset = (practiceAmount - 1) / 2;
+				const matrix = new THREE.Matrix4();
+				let i = 0;
+				
+				for ( let x = 0; x < practiceAmount && i < practiceTotal; x++ ) {
+					for ( let y = 0; y < practiceAmount && i < practiceTotal; y++ ) {
+						for ( let z = 0; z < practiceAmount && i < practiceTotal; z++ ) {
+							const px = offset - x;
+							const py = offset - y;
+							const pz = offset - z;
+							matrix.setPosition( px, py, pz );
+							mesh.setMatrixAt( i, matrix );
+							instancePositions[i] = new THREE.Vector3( px, py, pz );
+							visibleBerries[i] = true;
+							
+							// make ~30% targets for practice
+							const rand = Math.random();
+							if ( rand < 0.3 ) { 
+								mesh.setColorAt( i, brightCherry ); 
+								isTargetInstance[i] = true; 
+							} else if ( rand < 0.6 ) { 
+								mesh.setColorAt( i, darkCherry ); 
+								isTargetInstance[i] = false; 
+							} else if ( rand < 0.8 ) { 
+								mesh.setColorAt( i, greenBerry ); 
+								isTargetInstance[i] = false; 
+							} else { 
+								mesh.setColorAt( i, darkGreen ); 
+								isTargetInstance[i] = false; 
+							}
+							i++;
+						}
+					}
+				}
+				
+				// Hide unused instances
+				for(let j=i; j<count; j++){
+					const m = new THREE.Matrix4(); 
+					m.setPosition(1e6,1e6,1e6); 
+					mesh.setMatrixAt(j,m);
+					visibleBerries[j] = false;
+				}
+				
+				mesh.instanceMatrix.needsUpdate = true;
+				if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
+				scene.add(mesh);
+				
+				// Position camera to see the practice grid
+				camera.position.set( 4, 4, 4 );
+				camera.lookAt(0,0,0);
+				controls.update(); // update orbit controls
+				
+				console.log('[Practice] Practice berries added to scene. Visible instances:', i);
+			}
+
+			function createPracticeHint(){
+				removePracticeHint();
+				practiceHintEl = document.createElement('div');
+				practiceHintEl.style.cssText='position:fixed;left:50%;top:14px;transform:translateX(-50%);background:rgba(20,20,20,.85);color:#fff;padding:10px 20px;border-radius:40px;font:500 13px system-ui,Segoe UI,sans-serif;letter-spacing:.5px;z-index:50;display:flex;align-items:center;gap:14px;box-shadow:0 4px 18px -6px #000;';
+				practiceHintEl.innerHTML = `<span style="color:#ffca7a;font-weight:600;">Practice Mode</span><span style='opacity:.8;'>Try clicking targets (LEFT) and distractors (RIGHT). Feedback will appear.</span>`;
+				document.body.appendChild(practiceHintEl);
+			}
+			function removePracticeHint(){ if(practiceHintEl){ practiceHintEl.remove(); practiceHintEl=null; } }
+
+			function showPracticeFeedback(correct,isTarget,action, x, y){
+				const fb = document.createElement('div');
+				fb.style.cssText = 'position:fixed;left:'+(x+8)+'px;top:'+(y+8)+'px;padding:6px 10px;border-radius:10px;font:600 12px system-ui,Segoe UI,sans-serif;pointer-events:none;z-index:200;transition:transform .4s, opacity .4s;';
+				fb.style.background = correct ? 'linear-gradient(135deg,#0f8a00,#23c423)' : 'linear-gradient(135deg,#8a0000,#c42323)';
+				fb.style.color = '#fff';
+				const expect = isTarget ? 'LEFT' : 'RIGHT';
+				fb.textContent = (correct? 'Correct':'Wrong') + ` (${expect} on ${isTarget?'TARGET':'DISTRACTOR'})`;
+				document.body.appendChild(fb);
+				requestAnimationFrame(()=>{ fb.style.opacity='1'; fb.style.transform='translateY(0)'; });
+				setTimeout(()=>{ fb.style.opacity='0'; fb.style.transform='translateY(-12px) scale(.95)'; }, 600);
+				setTimeout(()=> fb.remove(), 1100);
+			}
+
+			function createPracticeControlPanel(){
+				if(practiceControlPanel) return;
+				practiceControlPanel = document.createElement('div');
+				practiceControlPanel.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:14px;align-items:center;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);padding:12px 20px;border-radius:24px;z-index:60;font:500 13px system-ui,Segoe UI,sans-serif;color:#fff;box-shadow:0 4px 18px -6px #000;';
+				practiceControlPanel.innerHTML = `
+					<span style='opacity:.85;'>Practice Mode — interact freely.</span>
+					<button id='beginMainFromPractice' style='padding:10px 18px;font-size:14px;font-weight:600;border:none;border-radius:18px;background:linear-gradient(135deg,#ff0040,#ff7a18);color:#fff;cursor:pointer;box-shadow:0 4px 14px -6px #ff004090;'>Begin Main ▶</button>
+				`;
+				document.body.appendChild(practiceControlPanel);
+				practiceControlPanel.querySelector('#beginMainFromPractice').addEventListener('click', startMainExperiment);
+			}
+
+			function removePracticeControlPanel(){ if(practiceControlPanel){ practiceControlPanel.remove(); practiceControlPanel=null; } }
+
+			function startMainExperiment(){
+				if(experimentStartTime) return;
+				// clean up practice
+				removePracticeHint();
+				removePracticeControlPanel();
+				practiceMode = false;
+				suppressOverlayRecovery = false; // allow watchdog after experiment if needed
+				generateBerries();
+				// Reset camera to proper main experiment position
+				camera.position.set( amount, amount, amount );
+				camera.lookAt( 0, 0, 0 );
+				controls.update(); // update orbit controls
+				experimentStartTime = performance.now();
+				travelCount = 1;
+				currentTrialStart = performance.now();
+				lastClickGlobalTime = null;
+				estimateRefreshRate();
+				document.getElementById('travelBadge').textContent = `TRAVEL ${travelCount}`;
+				doneButton.style.display='';
+				doneButton.disabled = false; doneButton.style.opacity = 1;
+				recordLayoutSnapshot(travelCount);
 			}
 
 			function animate() {
