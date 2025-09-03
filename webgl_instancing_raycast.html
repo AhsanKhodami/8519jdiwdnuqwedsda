@@ -89,7 +89,7 @@
 			let loadingOverlay, loadingText, doneButton; // UI elements
 			let participantOverlay, instructionOverlay, appreciationOverlay; // additional overlays
 			let startButton, beginButton, finishButton; // control buttons
-			const maxTrials = 5; // configurable number of trials (travels)
+			const maxTrials = 2; // configurable number of trials (travels) - reduced for testing
 			let participant = { name: '', age: '', gender: '' };
 			let experimentStartTime = 0;
 			let currentTrialStart = 0;
@@ -100,6 +100,13 @@
 			let lastSummarizedTrial = 0; // avoid duplicate summaries
 			let estimatedRefreshHz = null; // estimated display refresh rate
 			const layoutData = []; // per-trial berry layout snapshot (targets/distractors before any clicks)
+			// Camera rotation tracking
+			let rotationCount = 0;
+			let rotationTimestamps = [];
+			let firstRotationTime = null;
+			let isDragging = false;
+			let lastDragEndTime = 0;
+			let initialCameraAngles = { azimuthal: 0, polar: 0 }; // track starting orientation per trial
 			let practiceMode = false; // true during practice phase (no data logging)
 			let practiceControlPanel = null; // floating panel with Begin Main during practice
 			let suppressOverlayRecovery = false; // disables watchdog while practice/main active
@@ -152,6 +159,58 @@
 				controls.enableDamping = true;
 				controls.enableZoom = false;
 				controls.enablePan = false;
+
+				// Gesture-based rotation tracking (one count per deliberate drag)
+				let dragActive = false; // internal flag separate from isDragging (trial state variables)
+				let dragMoved = false;  // ensure we only count drags that actually move the camera
+				const dragThreshold = 0.0005; // minimal angle change to qualify as a rotation gesture
+				let lastAz = controls.getAzimuthalAngle();
+				let lastPol = controls.getPolarAngle();
+
+				function markRotationGesture(){
+					if(!experimentStartTime || !currentTrialStart) return;
+					const now = performance.now();
+					const trialTime = Math.round(now - currentTrialStart);
+					rotationCount++;
+					rotationTimestamps.push(trialTime);
+					if(firstRotationTime === null) firstRotationTime = trialTime;
+					// console.log('[Rotation] gesture', rotationCount, 'at', trialTime+'ms');
+				}
+
+				renderer.domElement.addEventListener('pointerdown', (e)=>{
+					if(e.button!==0) return; // only left button for rotation gestures
+					dragActive = true;
+					dragMoved = false;
+					lastAz = controls.getAzimuthalAngle();
+					lastPol = controls.getPolarAngle();
+				});
+
+				renderer.domElement.addEventListener('pointermove', ()=>{
+					if(!dragActive) return;
+					const az = controls.getAzimuthalAngle();
+					const pol = controls.getPolarAngle();
+					const dAz = Math.abs(az - lastAz);
+					const dPol = Math.abs(pol - lastPol);
+					if(dAz > dragThreshold || dPol > dragThreshold){
+						dragMoved = true;
+					}
+				});
+
+				renderer.domElement.addEventListener('pointerup', (e)=>{
+					if(!dragActive) return;
+					dragActive = false;
+					if(e.button===0 && dragMoved){
+						// Debounce successive drags separated only by damping frames
+						const now = performance.now();
+						if(now - lastDragEndTime > 80){ // 80ms gap to separate gestures
+							markRotationGesture();
+						}
+						lastDragEndTime = now;
+					}
+				});
+
+				// In case pointer leaves the canvas
+				window.addEventListener('pointerleave', ()=>{ dragActive=false; });
 
 				// (Optional) remove stats overlay to avoid intercepting clicks
 				// stats = new Stats();
@@ -338,6 +397,14 @@
 				beginButton = wrap.querySelector('#beginBtn');
 				beginButton.addEventListener('click', ()=>{
 					if(experimentStartTime) return; // already started
+					// Reset rotation tracking for main experiment
+					rotationCount = 0;
+					rotationTimestamps = [];
+					firstRotationTime = null;
+					isDragging = false;
+					lastDragEndTime = 0;
+					// Record initial camera angles for first trial
+					recordInitialCameraAngles();
 					experimentStartTime = performance.now();
 					travelCount = 1;
 					currentTrialStart = performance.now();
@@ -366,13 +433,13 @@
 					<h2 style="margin:0 0 10px;font-weight:600;letter-spacing:.5px">Participant Info</h2>
 					<p style="margin:0 0 18px;line-height:1.45;font-size:14px;opacity:.85">Enter your details. You'll see full color legend & controls next.</p>
 					<label style='display:block;font-size:13px;margin:0 0 4px'>Name</label>
-					<input id='pName' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 14px;font-size:14px' placeholder='Your name' />
+					<input id='pName' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 14px;font-size:14px' placeholder='Your name' value='Agent' />
 					<label style='display:block;font-size:13px;margin:0 0 4px'>Age</label>
-					<input id='pAge' type='number' min='0' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 14px;font-size:14px' placeholder='Age' />
+					<input id='pAge' type='number' min='0' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 14px;font-size:14px' placeholder='Age' value='25' />
 					<label style='display:block;font-size:13px;margin:0 0 4px'>Gender</label>
 					<select id='pGender' style='width:100%;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#fff;margin:0 0 26px;font-size:14px'>
-						<option value='' disabled selected hidden>Select</option>
-						<option value='female'>Female</option>
+						<option value='' disabled hidden>Select</option>
+						<option value='female' selected>Female</option>
 						<option value='male'>Male</option>
 						<option value='nonbinary'>Non-binary</option>
 						<option value='prefer_not'>Prefer not to say</option>
@@ -521,7 +588,7 @@
 				doneButton.style.filter = 'grayscale(1)';
 				doneButton.style.cursor = 'not-allowed';
 				loadingOverlay.style.display = 'flex';
-				const total = 20000; // 20s
+				const total = 5000; // 5s
 				const start = performance.now();
 				updateProgress(0, total);
 				function frame(now){
@@ -545,10 +612,18 @@
 			function finishTravel() {
 				generateBerries();
 				recordLayoutSnapshot(travelCount); // capture new patch layout before interaction
+				// Reset camera rotation tracking for new trial
+				rotationCount = 0;
+				rotationTimestamps = [];
+				firstRotationTime = null;
+				isDragging = false;
+				lastDragEndTime = 0;
 				// Reset camera to standard view for each new patch
 				camera.position.set( amount, amount, amount );
 				camera.lookAt( 0, 0, 0 );
 				controls.reset(); // reset orbit controls to initial state
+				// Record initial camera angles after reset (baseline for this trial)
+				recordInitialCameraAngles();
 				loadingText.textContent = 'Deployed!';
 				setTimeout(()=>{
 					loadingOverlay.style.display = 'none';
@@ -647,7 +722,19 @@
 				if(lastSummarizedTrial === travelCount) return; // already done
 				const trialClicks = clickData.filter(c=> c.trial === travelCount);
 				if(!trialClicks.length) { // still push empty summary
-					trialData.push({ trial: travelCount, targetsPicked:0, targetsRejected:0, distractorsPicked:0, distractorsRejected:0, totalClicks:0 });
+					trialData.push({ 
+						trial: travelCount, 
+						targetsPicked:0, 
+						targetsRejected:0, 
+						distractorsPicked:0, 
+						distractorsRejected:0, 
+						totalClicks:0, 
+						rotationCount: rotationCount, 
+						firstRotationTime: firstRotationTime ?? '', 
+						rotationIntervals: 'NA',
+						initialAzimuthal: initialCameraAngles.azimuthal,
+						initialPolar: initialCameraAngles.polar
+					});
 					lastSummarizedTrial = travelCount;
 					return;
 				}
@@ -659,7 +746,39 @@
 						if(c.action==='LEFT_PICK') distractorsPicked++; else distractorsRejected++;
 					}
 				});
-				trialData.push({ trial: travelCount, targetsPicked, targetsRejected, distractorsPicked, distractorsRejected, totalClicks: trialClicks.length });
+				// Build rotation intervals or mark NA if fewer than 2 rotations
+				let intervals;
+				if(rotationTimestamps.length < 2){
+					intervals = ['NA'];
+				} else {
+					let rawIntervals = [];
+					for(let i=1;i<rotationTimestamps.length;i++){
+						rawIntervals.push(rotationTimestamps[i]-rotationTimestamps[i-1]);
+					}
+					// Sanitize: remove non-positive, merge small gaps (<60ms) into previous
+					intervals = [];
+					rawIntervals.forEach(iv=>{
+						if(iv <= 0) return;
+						if(iv < 60 && intervals.length){
+							intervals[intervals.length-1] += iv;
+						} else {
+							intervals.push(iv);
+						}
+					});
+				}
+				trialData.push({
+					trial: travelCount,
+					targetsPicked,
+					targetsRejected,
+					distractorsPicked,
+					distractorsRejected,
+					totalClicks: trialClicks.length,
+					rotationCount,
+					firstRotationTime: firstRotationTime ?? '',
+					rotationIntervals: intervals.join(' '),
+					initialAzimuthal: initialCameraAngles.azimuthal,
+					initialPolar: initialCameraAngles.polar
+				});
 				lastSummarizedTrial = travelCount;
 			}
 
@@ -694,9 +813,9 @@
 				});
 				lines.push('');
 				lines.push('TRIAL_SUMMARY');
-				lines.push('trial,targetsPicked,targetsRejected,distractorsPicked,distractorsRejected,totalClicks');
+				lines.push('trial,targetsPicked,targetsRejected,distractorsPicked,distractorsRejected,totalClicks,rotationCount,firstRotationTime,rotationIntervals,initialAzimuthal,initialPolar');
 				trialData.forEach(t=>{
-					lines.push([t.trial,t.targetsPicked,t.targetsRejected,t.distractorsPicked,t.distractorsRejected,t.totalClicks].join(','));
+					lines.push([t.trial,t.targetsPicked,t.targetsRejected,t.distractorsPicked,t.distractorsRejected,t.totalClicks,t.rotationCount ?? '',t.firstRotationTime ?? '',`[${t.rotationIntervals??''}]`,t.initialAzimuthal ?? '',t.initialPolar ?? ''].join(','));
 				});
 				const csv = lines.join('\n');
 				const blob = new Blob([csv], { type: 'text/csv' });
@@ -742,6 +861,20 @@
 					targetIds,
 					distractorIds
 				});
+			}
+
+			function recordInitialCameraAngles() {
+				// Calculate spherical coordinates from camera position relative to target (0,0,0)
+				const pos = camera.position.clone();
+				const radius = pos.length();
+				const azimuthal = Math.atan2(pos.x, pos.z); // angle around Y axis
+				const polar = Math.acos(pos.y / radius); // angle from Y axis
+				
+				initialCameraAngles = {
+					azimuthal: Math.round(azimuthal * 180 / Math.PI * 100) / 100, // degrees, 2 decimal places
+					polar: Math.round(polar * 180 / Math.PI * 100) / 100
+				};
+				console.log('[Camera] Initial angles for trial', travelCount, '- azimuthal:', initialCameraAngles.azimuthal, 'polar:', initialCameraAngles.polar);
 			}
 
 			// ---------------- PRACTICE MODE SUPPORT ----------------
@@ -864,6 +997,14 @@
 				camera.position.set( amount, amount, amount );
 				camera.lookAt( 0, 0, 0 );
 				controls.update(); // update orbit controls
+				// Reset rotation tracking for main experiment
+				rotationCount = 0;
+				rotationTimestamps = [];
+				firstRotationTime = null;
+				isDragging = false;
+				lastDragEndTime = 0;
+				// Record initial camera angles for first trial
+				recordInitialCameraAngles();
 				experimentStartTime = performance.now();
 				travelCount = 1;
 				currentTrialStart = performance.now();
