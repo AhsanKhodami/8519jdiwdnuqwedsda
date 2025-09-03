@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl - instancing - raycast</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="main.css">
+		<style>
+			body { margin: 0; overflow: hidden; }
+			/* Disable context menu everywhere */
+			* { -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none; }
+		</style>
+	</head>
+	<body oncontextmenu="return false;">
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.module.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three';
+
+			import Stats from './jsm/jsm/libs/stats.module.js';
+			import { OrbitControls } from './OrbitControls.js';
+
+			let camera, scene, renderer, controls, stats;
+			let lastPickTime = 0; // debounce duplicate pointer events
+
+			let mesh;
+			const amount = parseInt( window.location.search.slice( 1 ) ) || 10;
+			const count = Math.pow( amount, 3 );
+
+			const raycaster = new THREE.Raycaster();
+			const mouse = new THREE.Vector2( 1, 1 );
+
+			const color = new THREE.Color();
+			const white = new THREE.Color().setHex( 0xffffff );
+			
+			// Berry colors for foraging task
+			const brightCherry = new THREE.Color().setHex( 0xff0040 ); // Bright red cherry (TARGET)
+			const darkCherry = new THREE.Color().setHex( 0x8b0000 );   // Dark red cherry (DISTRACTOR)
+			const greenBerry = new THREE.Color().setHex( 0x228b22 );   // Green berry (DISTRACTOR)
+			const darkGreen = new THREE.Color().setHex( 0x006400 );    // Dark green berry (DISTRACTOR)
+			
+			// Track which berries are still visible
+			const visibleBerries = new Array(count).fill(true);
+			// Store original positions for fallback picking (Vector3 per instance)
+			const instancePositions = new Array(count);
+
+			init();
+
+			function init() {
+
+				camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 100 );
+				camera.position.set( amount, amount, amount );
+				camera.lookAt( 0, 0, 0 );
+
+				scene = new THREE.Scene();
+
+				const light = new THREE.HemisphereLight( 0xffffff, 0x888888, 3 );
+				light.position.set( 0, 1, 0 );
+				scene.add( light );
+
+				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 );
+				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
+
+				mesh = new THREE.InstancedMesh( geometry, material, count );
+
+				let i = 0;
+				const offset = ( amount - 1 ) / 2;
+
+				const matrix = new THREE.Matrix4();
+
+				for ( let x = 0; x < amount; x ++ ) {
+
+					for ( let y = 0; y < amount; y ++ ) {
+
+						for ( let z = 0; z < amount; z ++ ) {
+
+							const px = offset - x;
+							const py = offset - y;
+							const pz = offset - z;
+							matrix.setPosition( px, py, pz );
+
+							mesh.setMatrixAt( i, matrix );
+							instancePositions[i] = new THREE.Vector3( px, py, pz );
+							
+							// Assign random berry colors for foraging
+							const rand = Math.random();
+							if ( rand < 0.3 ) {
+								mesh.setColorAt( i, brightCherry ); // 30% bright cherry (targets)
+							} else if ( rand < 0.6 ) {
+								mesh.setColorAt( i, darkCherry );   // 30% dark cherry
+							} else if ( rand < 0.8 ) {
+								mesh.setColorAt( i, greenBerry );   // 20% green
+							} else {
+								mesh.setColorAt( i, darkGreen );    // 20% dark green
+							}
+
+							i ++;
+
+						}
+
+					}
+
+				}
+
+				scene.add( mesh );
+
+				// Ensure GPU gets color & matrix data
+				mesh.instanceMatrix.needsUpdate = true;
+				if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
+
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.setAnimationLoop( animate );
+				document.body.appendChild( renderer.domElement );
+
+				controls = new OrbitControls( camera, renderer.domElement );
+				controls.enableDamping = true;
+				controls.enableZoom = false;
+				controls.enablePan = false;
+
+				// (Optional) remove stats overlay to avoid intercepting clicks
+				// stats = new Stats();
+				// document.body.appendChild( stats.dom );
+
+				window.addEventListener( 'resize', onWindowResize );
+				renderer.domElement.addEventListener( 'pointermove', onPointerMove );
+				renderer.domElement.addEventListener( 'pointerdown', onPointerDown );
+				renderer.domElement.addEventListener( 'contextmenu', (e)=>{ e.preventDefault(); e.stopPropagation(); return false; });
+				
+				// Completely disable context menu everywhere
+				document.addEventListener('contextmenu', function(e) { e.preventDefault(); return false; });
+				window.addEventListener('contextmenu', function(e) { e.preventDefault(); return false; });
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			function onPointerMove( event ) {
+				mouse.x = ( event.clientX / renderer.domElement.clientWidth ) * 2 - 1;
+				mouse.y = - ( event.clientY / renderer.domElement.clientHeight ) * 2 + 1;
+			}
+
+			function onPointerDown( event ) {
+				const now = performance.now();
+				if ( now - lastPickTime < 40 ) { return; } // debounce duplicate synthetic events
+				lastPickTime = now;
+				const btn = event.button;
+				if ( btn !== 0 && btn !== 2 ) return;
+				const rect = renderer.domElement.getBoundingClientRect();
+				const cx = event.clientX - rect.left;
+				const cy = event.clientY - rect.top;
+				mouse.x = ( cx / rect.width ) * 2 - 1;
+				mouse.y = - ( cy / rect.height ) * 2 + 1;
+				const picked = pickInstance( { clientX: event.clientX, clientY: event.clientY } );
+				if ( picked === -1 ) return;
+				if ( !visibleBerries[picked] ) return;
+				mesh.getColorAt( picked, color );
+				visibleBerries[picked] = false;
+				const hideMatrix = new THREE.Matrix4(); hideMatrix.setPosition( 1e6, 1e6, 1e6 );
+				mesh.setMatrixAt( picked, hideMatrix ); mesh.instanceMatrix.needsUpdate = true;
+				console.log( btn===0 ? 'PICKED id='+picked : 'NOT_PICKED id='+picked );
+			}
+
+			// Attempt raycast first, fallback to screen-space nearest instance
+			function pickInstance( event ) {
+				raycaster.setFromCamera( mouse, camera );
+				const hits = raycaster.intersectObject( mesh, false );
+				if ( hits.length && hits[0].instanceId !== undefined ) {
+					console.log('Raycast hit id=', hits[0].instanceId);
+					return hits[0].instanceId;
+				}
+				// fallback: screen-space nearest
+				let bestId = -1; let bestDist = 60; // allow larger threshold
+				const w = renderer.domElement.clientWidth; const h = renderer.domElement.clientHeight;
+				const pointerX = event.clientX; const pointerY = event.clientY;
+				const v = new THREE.Vector3();
+				let considered = 0;
+				for ( let i = 0; i < count; i++ ) {
+					if ( !visibleBerries[i] ) continue;
+					v.copy( instancePositions[i] ).project( camera );
+					if ( v.z < -1 || v.z > 1 ) continue; // behind camera or clipped
+					const sx = ( v.x * 0.5 + 0.5 ) * w;
+					const sy = ( - v.y * 0.5 + 0.5 ) * h;
+					const dx = sx - pointerX; const dy = sy - pointerY;
+					const dist = Math.hypot( dx, dy );
+					if ( dist < bestDist ) { bestDist = dist; bestId = i; }
+					considered++;
+				}
+				console.log('Fallback considered', considered, 'instances. Chosen id=', bestId, 'dist=', bestDist.toFixed(1));
+				return bestId;
+			}
+
+			// legacy helper kept empty
+			function hideBerry() {}
+
+			function animate() {
+
+				controls.update();
+
+				renderer.render( scene, camera );
+
+				// if ( stats ) stats.update();
+
+			}
+
+		</script>
+	</body>
+</html>
