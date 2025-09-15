@@ -86,6 +86,8 @@
 			let visibleBerries; // will be (re)allocated per generation
 			let instancePositions; // stores Vector3 positions per instance
 			let mesh; // current instanced mesh
+			let sideTextMeshes = []; // stores text meshes for side numbers (will be removed soon)
+			let faceCenterBalls = []; // standalone blue numbered balls (main mode only)
 			let loadingOverlay, loadingText, doneButton; // UI elements
 			let participantOverlay, instructionOverlay, appreciationOverlay; // additional overlays
 			let startButton, beginButton, finishButton; // control buttons
@@ -96,6 +98,7 @@
 			const clickData = []; // per click records
 			const trialData = []; // per trial summary
 			let isTargetInstance = []; // boolean per instance for reliable classification
+			let isCenterBall = []; // boolean per instance to mark non-clickable center balls
 			let lastClickGlobalTime = null; // for inter-click RT
 			let lastSummarizedTrial = 0; // avoid duplicate summaries
 			let estimatedRefreshHz = null; // estimated display refresh rate
@@ -129,6 +132,7 @@
 			const darkCherry = new THREE.Color().setHex( 0x8b0000 );   // Dark red cherry (DISTRACTOR)
 			const greenBerry = new THREE.Color().setHex( 0x228b22 );   // Green berry (DISTRACTOR)
 			const darkGreen = new THREE.Color().setHex( 0x006400 );    // Dark green berry (DISTRACTOR)
+			const sideBlue = new THREE.Color().setHex( 0x0066ff );     // Blue for center balls of each side (NON-CLICKABLE)
 			
 			// Arrays will be filled in generateBerries()
 			visibleBerries = new Array(count);
@@ -392,6 +396,11 @@
 					mesh.material.dispose();
 					mesh = null;
 				}
+				
+				// Remove existing face center custom balls
+				faceCenterBalls.forEach(b=>scene.remove(b));
+				faceCenterBalls = [];
+				
 				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 );
 				if(practiceMode){
 					// In practice we use a smaller randomized set; delegate and exit.
@@ -402,9 +411,16 @@
 				mesh = new THREE.InstancedMesh( geometry, material, count );
 				visibleBerries.fill( true );
 				if(isTargetInstance.length !== count) isTargetInstance = new Array(count);
+				if(isCenterBall.length !== count) isCenterBall = new Array(count);
+				
 				const offset = ( amount - 1 ) / 2;
 				const matrix = new THREE.Matrix4();
 				let i = 0;
+				
+				// For a 10x10x10 cube, the center of each face is at index 4.5 from offset
+				// Since we use integer indices, the center would be at the middle
+				const faceCenter = Math.floor(amount / 2); // This gives us index 5 for a 10x10 face (0-9)
+				
 				for ( let x = 0; x < amount; x ++ ) {
 					for ( let y = 0; y < amount; y ++ ) {
 						for ( let z = 0; z < amount; z ++ ) {
@@ -414,19 +430,86 @@
 							matrix.setPosition( px, py, pz );
 							mesh.setMatrixAt( i, matrix );
 							instancePositions[i] = new THREE.Vector3( px, py, pz );
-							const rand = Math.random();
-							if ( rand < 0.3 ) { mesh.setColorAt( i, brightCherry ); isTargetInstance[i] = true; }
-							else if ( rand < 0.6 ) { mesh.setColorAt( i, darkCherry ); isTargetInstance[i] = false; }
-							else if ( rand < 0.8 ) { mesh.setColorAt( i, greenBerry ); isTargetInstance[i] = false; }
-							else { mesh.setColorAt( i, darkGreen ); isTargetInstance[i] = false; }
+							
+							// Determine if this is a face center. If so, we will later overlay custom ball; hide instance.
+							let faceIndex = 0;
+							if (x === 0 && y === faceCenter && z === faceCenter) faceIndex = 1; // Left
+							else if (x === amount-1 && y === faceCenter && z === faceCenter) faceIndex = 2; // Right
+							else if (y === 0 && x === faceCenter && z === faceCenter) faceIndex = 3; // Bottom
+							else if (y === amount-1 && x === faceCenter && z === faceCenter) faceIndex = 4; // Top
+							else if (z === 0 && x === faceCenter && y === faceCenter) faceIndex = 5; // Back
+							else if (z === amount-1 && x === faceCenter && y === faceCenter) faceIndex = 6; // Front
+
+							if (faceIndex) {
+								// Hide this instance (move far away) and mark non-clickable
+								const hideMatrix = new THREE.Matrix4(); hideMatrix.setPosition(1e6,1e6,1e6);
+								mesh.setMatrixAt(i, hideMatrix);
+								visibleBerries[i] = false;
+								isTargetInstance[i] = false;
+								isCenterBall[i] = true;
+								// Create custom numbered ball at real position
+								const numBall = createNumberBall(faceIndex, new THREE.Vector3(px, py, pz));
+								faceCenterBalls.push(numBall);
+							} else {
+								isCenterBall[i] = false;
+								const rand = Math.random();
+								if ( rand < 0.3 ) { mesh.setColorAt( i, brightCherry ); isTargetInstance[i] = true; }
+								else if ( rand < 0.6 ) { mesh.setColorAt( i, darkCherry ); isTargetInstance[i] = false; }
+								else if ( rand < 0.8 ) { mesh.setColorAt( i, greenBerry ); isTargetInstance[i] = false; }
+								else { mesh.setColorAt( i, darkGreen ); isTargetInstance[i] = false; }
+							}
 							i++;
 						}
 					}
 				}
-				scene.add( mesh );
+					scene.add( mesh );
+					// Add numbered face center balls
+					faceCenterBalls.forEach(b=>scene.add(b));
 				mesh.instanceMatrix.needsUpdate = true;
 				if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
 			}
+
+            // Utility: create a standalone blue numbered ball (NOT an instance) for face centers
+            function createNumberBall(number, position){
+				const group = new THREE.Group();
+				const sphereGeo = new THREE.SphereGeometry(0.55, 32, 32);
+				const sphereMat = new THREE.MeshPhongMaterial({ color: 0x0066ff, emissive: 0x002244, shininess: 60 });
+				const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+				group.add(sphere);
+
+				// Canvas for number texture
+				const canvas = document.createElement('canvas');
+				canvas.width = 256; canvas.height = 256;
+				const ctx = canvas.getContext('2d');
+				ctx.clearRect(0,0,256,256);
+				ctx.font = 'bold 180px Arial';
+				ctx.fillStyle = 'white';
+				ctx.strokeStyle = 'black';
+				ctx.lineWidth = 18;
+				ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+				ctx.strokeText(number.toString(), 128,128);
+				ctx.fillText(number.toString(), 128,128);
+				const tex = new THREE.CanvasTexture(canvas);
+				const planeMat = new THREE.MeshBasicMaterial({ map: tex, transparent:true, side:THREE.DoubleSide });
+				const plane = new THREE.Mesh(new THREE.PlaneGeometry(0.9,0.9), planeMat);
+
+				// Compute outward normal from world position so label always points away from cube center
+				const normal = position.clone().normalize(); // outward from origin
+				plane.position.copy(normal.clone().multiplyScalar(0.56));
+				// Pick a consistent up vector not parallel to normal
+				let up = new THREE.Vector3(0,1,0);
+				if (Math.abs(normal.dot(up)) > 0.9) up.set(1,0,0);
+				// Build orthonormal basis (z = normal)
+				const zAxis = normal.clone();
+				const xAxis = new THREE.Vector3().crossVectors(up, zAxis).normalize();
+				const yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
+				const m = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+				const q = new THREE.Quaternion().setFromRotationMatrix(m);
+				plane.setRotationFromQuaternion(q);
+				group.add(plane);
+				group.position.copy(position);
+				return group;
+            }
 
 			function createUI() {
  				// Travel button
@@ -761,6 +844,7 @@
 				const picked = pickInstance( { clientX: event.clientX, clientY: event.clientY } );
 				if ( picked === -1 ) return;
 				if ( !visibleBerries[picked] ) return;
+				if ( isCenterBall[picked] ) return; // Prevent clicking on center balls (side markers)
 				
 				// Prevent OrbitControls from handling this event since we picked a ball
 				event.preventDefault();
@@ -1007,72 +1091,47 @@
 			// ---------------- PRACTICE MODE SUPPORT ----------------
 			let practiceHintEl = null;
 			function generatePracticeBerries(){
-				// simplified small set for practice (regardless of amount)
+				// Remove any numbered blue balls from main mode
+				if(faceCenterBalls && faceCenterBalls.length){
+					faceCenterBalls.forEach(b=>scene.remove(b));
+					faceCenterBalls = [];
+				}
 				console.log('[Practice] Generating practice berries');
-				const practiceTotal = Math.min(60, count); // smaller for practice
+				const practiceTotal = Math.min(60, count);
 				isTargetInstance = new Array(count).fill(false);
 				visibleBerries = new Array(count).fill(false);
 				instancePositions = new Array(count);
 				if(mesh){ scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
-				const geometry = new THREE.IcosahedronGeometry( 0.5, 3 ); // same as main
-				const material = new THREE.MeshPhongMaterial( { color: 0xffffff } ); // same as main
-				mesh = new THREE.InstancedMesh( geometry, material, count );
-				mesh.instanceMatrix.setUsage( THREE.DynamicDrawUsage );
-				
-				// Create a smaller 4x4x4 grid for practice (centered around origin)
+				const geometry = new THREE.IcosahedronGeometry(0.5,3);
+				const material = new THREE.MeshPhongMaterial({ color:0xffffff });
+				mesh = new THREE.InstancedMesh(geometry, material, count);
+				mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 				const practiceAmount = 4;
 				const offset = (practiceAmount - 1) / 2;
 				const matrix = new THREE.Matrix4();
-				let i = 0;
-				
-				for ( let x = 0; x < practiceAmount && i < practiceTotal; x++ ) {
-					for ( let y = 0; y < practiceAmount && i < practiceTotal; y++ ) {
-						for ( let z = 0; z < practiceAmount && i < practiceTotal; z++ ) {
-							const px = offset - x;
-							const py = offset - y;
-							const pz = offset - z;
-							matrix.setPosition( px, py, pz );
-							mesh.setMatrixAt( i, matrix );
-							instancePositions[i] = new THREE.Vector3( px, py, pz );
+				let i=0;
+				for(let x=0;x<practiceAmount && i<practiceTotal;x++){
+					for(let y=0;y<practiceAmount && i<practiceTotal;y++){
+						for(let z=0;z<practiceAmount && i<practiceTotal;z++){
+							const px = offset - x; const py = offset - y; const pz = offset - z;
+							matrix.setPosition(px,py,pz);
+							mesh.setMatrixAt(i,matrix);
+							instancePositions[i] = new THREE.Vector3(px,py,pz);
 							visibleBerries[i] = true;
-							
-							// make ~30% targets for practice
 							const rand = Math.random();
-							if ( rand < 0.3 ) { 
-								mesh.setColorAt( i, brightCherry ); 
-								isTargetInstance[i] = true; 
-							} else if ( rand < 0.6 ) { 
-								mesh.setColorAt( i, darkCherry ); 
-								isTargetInstance[i] = false; 
-							} else if ( rand < 0.8 ) { 
-								mesh.setColorAt( i, greenBerry ); 
-								isTargetInstance[i] = false; 
-							} else { 
-								mesh.setColorAt( i, darkGreen ); 
-								isTargetInstance[i] = false; 
-							}
+							if ( rand < 0.3 ) { mesh.setColorAt( i, brightCherry ); isTargetInstance[i] = true; }
+							else if ( rand < 0.6 ) { mesh.setColorAt( i, darkCherry ); }
+							else if ( rand < 0.8 ) { mesh.setColorAt( i, greenBerry ); }
+							else { mesh.setColorAt( i, darkGreen ); }
 							i++;
 						}
 					}
 				}
-				
-				// Hide unused instances
-				for(let j=i; j<count; j++){
-					const m = new THREE.Matrix4(); 
-					m.setPosition(1e6,1e6,1e6); 
-					mesh.setMatrixAt(j,m);
-					visibleBerries[j] = false;
+				for(let j=i;j<count;j++){
+					const hide = new THREE.Matrix4(); hide.setPosition(1e6,1e6,1e6); mesh.setMatrixAt(j,hide); visibleBerries[j]=false;
 				}
-				
-				mesh.instanceMatrix.needsUpdate = true;
-				if ( mesh.instanceColor ) mesh.instanceColor.needsUpdate = true;
-				scene.add(mesh);
-				
-				// Position camera to see the practice grid
-				camera.position.set( 4, 4, 4 );
-				camera.lookAt(0,0,0);
-				controls.update(); // update orbit controls
-				
+				mesh.instanceMatrix.needsUpdate = true; if(mesh.instanceColor) mesh.instanceColor.needsUpdate = true; scene.add(mesh);
+				camera.position.set(4,4,4); camera.lookAt(0,0,0); controls.update();
 				console.log('[Practice] Practice berries added to scene. Visible instances:', i);
 			}
 
