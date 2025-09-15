@@ -108,6 +108,9 @@
 			let lastDragEndTime = 0;
 			let initialCameraAngles = { azimuthal: 0, polar: 0 }; // track starting orientation per trial
 			const orientationData = []; // per-rotation orientation log
+			const rotationPathLog = []; // continuous rotation path during drags
+			let lastPathLogTime = 0; // for throttling path logging to ~50ms intervals
+			let currentDragPathSamples = []; // temporary array for current drag session
 			let practiceMode = false; // true during practice phase (no data logging)
 			let practiceControlPanel = null; // floating panel with Begin Main during practice
 			let suppressOverlayRecovery = false; // disables watchdog while practice/main active
@@ -184,6 +187,8 @@
 					dragMoved = false;
 					lastAz = controls.getAzimuthalAngle();
 					lastPol = controls.getPolarAngle();
+					currentDragPathSamples = []; // Clear path samples for new drag session
+					lastPathLogTime = 0; // Reset throttling timer
 				});
 
 				renderer.domElement.addEventListener('pointermove', ()=>{
@@ -194,6 +199,24 @@
 					const dPol = Math.abs(pol - lastPol);
 					if(dAz > dragThreshold || dPol > dragThreshold){
 						dragMoved = true;
+					}
+					
+					// Continuous path logging with throttling (~50ms intervals)
+					if(!practiceMode && experimentStartTime && currentTrialStart) {
+						const now = performance.now();
+						if(now - lastPathLogTime >= 50) { // Log every ~50ms
+							const globalTimeMs = Math.round(now - experimentStartTime);
+							const trialTimeMs = Math.round(now - currentTrialStart);
+							currentDragPathSamples.push({
+								trial: travelCount,
+								rotationIndex: rotationCount + 1, // Will be the index for this drag session
+								globalTimeMs: globalTimeMs,
+								trialTimeMs: trialTimeMs,
+								azimuthalDeg: Math.round(az * 180 / Math.PI * 100)/100,
+								polarDeg: Math.round(pol * 180 / Math.PI * 100)/100
+							});
+							lastPathLogTime = now;
+						}
 					}
 				});
 
@@ -216,13 +239,28 @@
 								azimuthalDeg: Math.round(az * 180 / Math.PI * 100)/100,
 								polarDeg: Math.round(pol * 180 / Math.PI * 100)/100
 							});
+							
+							// Finalize rotation path samples - update them with correct rotationIndex and move to main log
+							if(!practiceMode && currentDragPathSamples.length > 0) {
+								currentDragPathSamples.forEach(sample => {
+									sample.rotationIndex = rotationCount; // Update with final rotation index
+									rotationPathLog.push(sample);
+								});
+								currentDragPathSamples = []; // Clear for next drag session
+							}
 						}
 						lastDragEndTime = now;
+					} else {
+						// Clear path samples if drag was cancelled or didn't qualify as a rotation gesture
+						currentDragPathSamples = [];
 					}
 				});
 
 				// In case pointer leaves the canvas
-				window.addEventListener('pointerleave', ()=>{ dragActive=false; });
+				window.addEventListener('pointerleave', ()=>{ 
+					dragActive=false; 
+					currentDragPathSamples = []; // Clear path samples if pointer leaves canvas
+				});
 
 				// (Optional) remove stats overlay to avoid intercepting clicks
 				// stats = new Stats();
@@ -835,6 +873,12 @@
 				lines.push('trial,rotationIndex,trialTimeMs,azimuthalDeg,polarDeg');
 				orientationData.forEach(o=>{
 					lines.push([o.trial,o.rotationIndex,o.trialTimeMs,o.azimuthalDeg,o.polarDeg].join(','));
+				});
+				lines.push('');
+				lines.push('ROTATION_PATH_LOG');
+				lines.push('trial,rotationIndex,globalTimeMs,trialTimeMs,azimuthalDeg,polarDeg');
+				rotationPathLog.forEach(p=>{
+					lines.push([p.trial,p.rotationIndex,p.globalTimeMs,p.trialTimeMs,p.azimuthalDeg,p.polarDeg].join(','));
 				});
 				const csv = lines.join('\n');
 				const blob = new Blob([csv], { type: 'text/csv' });
